@@ -20,6 +20,7 @@ trap 'rm -f "$config_file"' EXIT
 
 cat >"$config_file" <<EOF
 http_port 0.0.0.0:${SQUID_PORT}
+pid_filename /run/squid/squid.pid
 
 http_access allow all
 
@@ -34,14 +35,41 @@ if [[ -f ${SQUID_CONFIG} ]]; then
 fi
 install -o root -g root -m 0644 "$config_file" "$SQUID_CONFIG"
 
-systemctl enable squid
-systemctl restart squid
+if [[ -d /run/systemd/system ]] && systemctl is-system-running >/dev/null 2>&1; then
+    systemctl enable squid
+    systemctl restart squid
+else
+    install -d -o proxy -g proxy -m 0755 /run/squid
+    squid -k shutdown -f "$SQUID_CONFIG" >/dev/null 2>&1 || true
+    for _ in {1..10}; do
+        [[ ! -f /run/squid/squid.pid ]] && break
+        sleep 1
+    done
+    squid -sYC -f "$SQUID_CONFIG"
+fi
 
-if ! ss -lnt '( sport = :'"$SQUID_PORT"' )' | tail -n +2 | grep -q .; then
+listening=false
+for _ in {1..10}; do
+    if ss -lnt | awk '{print $4}' | grep -q ":${SQUID_PORT}$"; then
+        listening=true
+        break
+    fi
+    sleep 1
+done
+
+if [[ $listening != true ]]; then
     echo "Squid is not listening on port ${SQUID_PORT}." >&2
-    systemctl --no-pager --full status squid
+    if [[ -d /run/systemd/system ]]; then
+        systemctl --no-pager --full status squid
+    else
+        squid -k parse -f "$SQUID_CONFIG"
+    fi
     exit 1
 fi
 
-systemctl --no-pager --full status squid
+if [[ -d /run/systemd/system ]]; then
+    systemctl --no-pager --full status squid
+else
+    ps -o pid,user,cmd -C squid
+fi
 echo "Squid is listening on 0.0.0.0:${SQUID_PORT}."
